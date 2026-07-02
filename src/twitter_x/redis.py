@@ -15,7 +15,9 @@ async def ensure_redis() -> aioredis.Redis | None:
         _redis_initialized = True
         if settings.redis_url and settings.redis_url.strip():
             try:
-                _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+                client = aioredis.from_url(settings.redis_url, decode_responses=True)
+                await client.ping()
+                _redis = client
             except Exception:
                 _redis = None
     return _redis

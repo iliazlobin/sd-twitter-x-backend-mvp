@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Computed, DateTime, ForeignKey, String, func
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from twitter_x.models.base import Base
@@ -20,6 +20,10 @@ class Tweet(Base):
     text: Mapped[str] = mapped_column(String(280), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    fts_vector = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', text)", persisted=False),
     )
 
     author = relationship("User", back_populates="tweets", lazy="selectin")

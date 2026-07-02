@@ -1,0 +1,72 @@
+# Functional — black-box acceptance against running stack
+# Starts the full stack (postgres + redis + app) via docker compose, runs the
+# acceptance test suite, then tears everything down.
+
+name: functional
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 13 * * *"
+
+concurrency:
+  group: functional-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_PORT: 8040
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start stack
+        run: |
+          cp .env.example .env
+          APP_PORT=${{ env.APP_PORT }} docker compose up --build -d
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:${{ env.APP_PORT }}/healthz; then
+              echo "Stack is healthy"
+              break
+            fi
+            echo "Waiting for stack... ($i/30)"
+            sleep 3
+          done
+          curl -sf http://localhost:${{ env.APP_PORT }}/healthz || {
+            echo "Stack failed to become healthy"
+            docker compose logs app --tail=50
+            docker compose logs db --tail=20
+            docker compose logs redis --tail=20
+            exit 1
+          }
+
+      - name: Run migrations
+        run: docker compose exec -T app alembic upgrade head
+
+      - name: Install test deps
+        run: |
+          pip install pytest httpx
+
+      - name: Acceptance tests
+        run: |
+          API_BASE_URL="http://localhost:${{ env.APP_PORT }}" \
+            python -m pytest verify/acceptance -v --tb=short
+
+      - name: Stack logs (on failure)
+        if: failure()
+        run: |
+          docker compose logs app --tail=100
+          docker compose logs db --tail=50
+          docker compose logs redis --tail=50
+
+      - name: Tear down
+        if: always()
+        run: APP_PORT=${{ env.APP_PORT }} docker compose down --volumes --remove-orphans

@@ -1,45 +1,87 @@
+# Twitter/X MVP — docker-compose
+# Slug: twitter-x
+#
+# Full stack: FastAPI app + PostgreSQL 16 + Redis 7.
+# Per MVP design decisions:
+#   D1: Postgres is the authoritative store for users, tweets, hashtags, follows.
+#   D2: Redis caches timelines (sorted sets) and trends (counter windows).
+#   D3: Fan-out is in-process (asyncio worker task in the app container).
+#
+# Start:   docker compose up --build -d
+# Stop:    docker compose down
+# Logs:    docker compose logs -f
+#
+# All services have Docker HEALTHCHECKs; compose waits for db + redis to
+# be healthy before starting app. The app port is configurable via APP_PORT.
+
 services:
   db:
     image: postgres:16-alpine
+    container_name: twitter-x-db
     environment:
       POSTGRES_USER: twitter_x
       POSTGRES_PASSWORD: twitter_x
       POSTGRES_DB: twitter_x
+    # Postgres is NOT published to the host by default — the app talks
+    # over the compose network. Uncomment only if you need to connect
+    # from a host tool (psql, pgAdmin, etc.):
+    # ports:
+    #   - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U twitter_x"]
       interval: 5s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - twitter-x-net
 
   redis:
     image: redis:7-alpine
+    container_name: twitter-x-redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - twitter-x-net
 
   app:
-    build: .
-    ports:
-      # Override the host port via APP_PORT env var to avoid collisions.
-      # Default 8040 — safe default for Twitter/X MVP.
-      - "${APP_PORT:-8040}:8000"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: twitter-x-app
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://twitter_x:twitter_x@db:5432/twitter_x
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: "postgresql+asyncpg://twitter_x:twitter_x@db:5432/twitter_x"
+      REDIS_URL: "redis://redis:6379/0"
+    ports:
+      - "${APP_PORT:-8040}:8000"
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\" || exit 1"]
-      interval: 5s
-      timeout: 3s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
       retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - twitter-x-net
+
+networks:
+  twitter-x-net:
+    driver: bridge
 
 volumes:
   pgdata:

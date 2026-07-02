@@ -1,7 +1,7 @@
 import uuid
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Computed, ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from twitter_x.models.base import Base
@@ -14,6 +14,10 @@ class Hashtag(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
+    fts_vector = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', name)", persisted=False),
+    )
 
     tweets = relationship("TweetHashtag", back_populates="hashtag", lazy="selectin")
 
