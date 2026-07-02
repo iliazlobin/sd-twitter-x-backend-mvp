@@ -16,7 +16,7 @@ class Hashtag(Base):
     name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     fts_vector = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('english', name)", persisted=False),
+        Computed("to_tsvector('english', name)", persisted=True),
     )
 
     tweets = relationship("TweetHashtag", back_populates="hashtag", lazy="selectin")

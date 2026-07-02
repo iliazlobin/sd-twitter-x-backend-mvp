@@ -23,7 +23,7 @@ class Tweet(Base):
     )
     fts_vector = mapped_column(
         TSVECTOR,
-        Computed("to_tsvector('english', text)", persisted=False),
+        Computed("to_tsvector('english', text)", persisted=True),
     )
 
     author = relationship("User", back_populates="tweets", lazy="selectin")
