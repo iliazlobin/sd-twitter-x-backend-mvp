@@ -1,29 +1,18 @@
-"""Shared fixtures for white-box tests."""
+from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import pytest
+from httpx import ASGITransport, AsyncClient
 
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from twitter_x.models.base import Base
-
-TEST_DATABASE_URL = "sqlite+aiosqlite:///file::memory:?cache=shared"
+from twitter_x.main import create_app
 
 
-@pytest_asyncio.fixture(scope="session")
-async def engine():
-    """Create an in-memory SQLite engine for tests."""
-    eng = create_async_engine(TEST_DATABASE_URL, echo=False)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
-    await eng.dispose()
+@pytest.fixture
+def app():
+    return create_app()
 
 
-@pytest_asyncio.fixture
-async def session(engine) -> AsyncGenerator[AsyncSession, None]:
-    """Fresh session per test with rollback isolation."""
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    async with factory() as s:
-        yield s
-        await s.rollback()
+@pytest.fixture
+async def client(app):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac

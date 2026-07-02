@@ -1,19 +1,25 @@
-import uuid
+from __future__ import annotations
+
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel
 
-from twitter_x.schemas.tweet import HashtagItem, TweetAuthor
+
+class TimelineItemAuthor(BaseModel):
+    user_id: UUID
+    username: str
 
 
 class TimelineItem(BaseModel):
-    tweet_id: uuid.UUID
+    tweet_id: UUID
+    author_id: UUID
+    username: str
     text: str
-    author: TweetAuthor
-    hashtags: list[HashtagItem]
     created_at: datetime
+    author: TimelineItemAuthor | None = None
 
 
 class TimelineResponse(BaseModel):
-    tweets: list[TimelineItem]
+    tweets: list[dict]  # flexible — items can have extra fields
     next_cursor: str | None

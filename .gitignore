@@ -17,5 +17,3 @@ dist/
 dump.rdb
 verify/logs/
 verify/state/
-.finalize.lock/
-.noship

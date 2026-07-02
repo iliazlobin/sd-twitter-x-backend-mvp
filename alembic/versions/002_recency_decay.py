@@ -1,39 +1,54 @@
-"""recency_decay function
+"""Add recency_decay function and GIN indexes for full-text search.
 
-Revision ID: 002
-Revises: 001
-Create Date: 2026-07-02
-
-Add a recency_decay(timestamp) SQL function that returns a score multiplier
-between 0 and 1, decaying exponentially from 1.0 at now to near-zero after
-30 days. Used by the full-text search query to boost recent tweets over
-older ones.
+Revision ID: 002_recency_decay
+Revises: 1093b16c00af
 """
 
-from collections.abc import Sequence
+from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "002"
-down_revision: str | None = "001"
-branch_labels: str | Sequence[str] | None = None
-depends_on: str | Sequence[str] | None = None
+# revision identifiers
+revision: str = "002_recency_decay"
+down_revision: Union[str, None] = "1093b16c00af"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION recency_decay(ts timestamptz)
-        RETURNS float8
+    # recency_decay: boost recent content, decay older content
+    # score_multiplier = 1.0 / (1.0 + extract(epoch from (now() - created_at)) / 86400.0)
+    # i.e. content 1 day old gets 0.5x, 2 days gets 0.33x, etc.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION recency_decay(created_at timestamptz)
+        RETURNS float
         LANGUAGE sql
-        IMMUTABLE
-        PARALLEL SAFE
+        IMMUTABLE PARALLEL SAFE
         AS $$
-            SELECT 1.0 / (1.0 + EXTRACT(EPOCH FROM (now() - ts)) / 86400.0)
-        $$
-        """
+            SELECT 1.0 / (1.0 + extract(epoch from (now() - created_at)) / 86400.0)
+        $$;
+    """)
+
+    # GIN indexes for full-text search on tsvector columns
+    op.execute("CREATE INDEX IF NOT EXISTS ix_tweets_fts ON tweets USING GIN (fts_vector);")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_hashtags_fts ON hashtags USING GIN (fts_vector);")
+
+    # Composite index for cursor pagination on tweets (created_at DESC, tweet_id DESC)
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_tweets_created_at_id "
+        "ON tweets (created_at DESC, tweet_id DESC);"
+    )
+
+    # Composite index for cursor pagination on follows join
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_follows_follower_created "
+        "ON follows (follower_id, created_at DESC);"
     )
 
 
 def downgrade() -> None:
-    op.execute("DROP FUNCTION IF EXISTS recency_decay(timestamptz)")
+    op.execute("DROP INDEX IF EXISTS ix_follows_follower_created;")
+    op.execute("DROP INDEX IF EXISTS ix_tweets_created_at_id;")
+    op.execute("DROP INDEX IF EXISTS ix_hashtags_fts;")
+    op.execute("DROP INDEX IF EXISTS ix_tweets_fts;")
+    op.execute("DROP FUNCTION IF EXISTS recency_decay(timestamptz);")

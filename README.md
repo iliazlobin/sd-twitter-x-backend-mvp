@@ -1,103 +1,66 @@
-# Twitter/X MVP
+# Twitter/X Backend MVP
 
-A real-time social platform backend that implements the core Twitter posting, timeline, search, and trending loop. One FastAPI process serves a REST API backed by PostgreSQL for durable storage and Redis for timeline caching, fan-out dispatch, and trending computation.
+A real-time social platform backend implementing the core Twitter posting, timeline fan-out,
+full-text search, and velocity-based trending loop. Serves REST endpoints via **FastAPI**
+backed by **PostgreSQL 16** for durable storage and **Redis 7** for timeline caching,
+fan-out dispatch, and trending computation.
 
-## Stack
+## Quickstart
 
-| Layer | Technology | Role |
-|-------|-----------|------|
-| **API** | FastAPI (Python 3.12) | REST endpoints, Pydantic validation, async handlers |
-| **Database** | PostgreSQL 16 | Durable store — users, tweets, hashtags, follows |
-| **Cache** | Redis 7 | Timeline ZSETs, fan-out queue, trend scores |
-| **Migrations** | Alembic | Schema versioning (2 migrations — initial + recency decay) |
-| **Background** | `asyncio` tasks (in-process) | Fan-out dispatch, trending computation |
-| **Container** | Docker Compose | `app` + `db` (Postgres) + `redis` containers |
-
-## Quick start
+Requires Docker & Docker Compose v2.22+.
 
 ```bash
-# 1. Copy env template (optional — built-in defaults work)
+# Clone and enter the repo
+git clone <repo-url> sd-twitter-x-backend
+cd sd-twitter-x-backend
+
+# Bootstrap environment
 cp .env.example .env
 
-# 2. Build and start the full stack
-APP_PORT=8040 docker compose up -d --build
+# Build and start all services
+docker compose up -d --build
 
-# 3. Wait for health
-sleep 15 && curl -sf http://localhost:8040/healthz
+# Run database migrations
+docker compose run --rm app alembic upgrade head
+
+# Verify the app is healthy
+curl -sf http://localhost:8010/healthz
 # → {"status":"ok"}
-
-# 4. Run migrations
-docker compose exec app alembic upgrade head
-
-# 5. Smoke test — create a user and tweet
-curl -sf http://localhost:8040/api/v1/users \
-  -H 'Content-Type: application/json' \
-  -d '{"username": "alice"}'
-# → {"user_id":"...","username":"alice","follower_count":0,...}
-
-curl -sf http://localhost:8040/api/v1/tweets \
-  -H 'Content-Type: application/json' \
-  -d '{"author_id":"<user_id>","text":"Hello #twitterx MVP!","hashtags":["mvp"]}'
-# → {"tweet_id":"...","text":"Hello #twitterx MVP!","hashtags":[...],...}
 ```
 
-## API
-
-### Core endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/healthz` | Health check — `{"status": "ok"}` |
-| `POST` | `/api/v1/users` | Create user — `{username, display_name?}` |
-| `GET` | `/api/v1/users/{user_id}` | Get user profile with follower/following counts |
-| `GET` | `/api/v1/users/{user_id}/tweets?cursor=` | Profile timeline (user's own tweets, paginated) |
-| `POST` | `/api/v1/users/{followee_id}/follow?follower_id=` | Follow user (idempotent) |
-| `DELETE` | `/api/v1/users/{followee_id}/follow?follower_id=` | Unfollow user (idempotent) |
-| `POST` | `/api/v1/tweets` | Create tweet — `{author_id, text, hashtags?}` |
-| `GET` | `/api/v1/tweets/{tweet_id}` | Get tweet detail with author + hashtags |
-| `GET` | `/api/v1/timeline/home?user_id=&cursor=` | Home timeline (followed users' tweets, paginated) |
-| `GET` | `/api/v1/search?q=&cursor=` | Full-text search across tweets and hashtags |
-| `GET` | `/api/v1/trends?window=1h&limit=10` | Velocity-ranked trending topics |
-
-### Pagination
-
-All list endpoints use cursor-based pagination. Cursors are opaque base64-encoded JSON tokens. Pass `null` for the first page; the response includes `next_cursor` if more results exist.
-
-```bash
-curl -s "http://localhost:8040/api/v1/timeline/home?user_id=<uuid>&cursor=<token>"
-```
+The API is now available at `http://localhost:8010`.
 
 ## Architecture
 
 ```mermaid
 graph TB
     subgraph api["FastAPI — port 8000"]
-        RT[Tweets Router]
-        RL[Timeline Router]
-        RU[Users Router]
-        RS[Search Router]
-        RTR[Trends Router]
+        RT["Tweets Router<br/>POST /api/v1/tweets<br/>GET /api/v1/tweets/{id}"]
+        RL["Home Timeline Router<br/>GET /api/v1/timeline/home"]
+        RU["Users Router<br/>CRUD + follow + profile timeline"]
+        RS["Search Router<br/>GET /api/v1/search"]
+        RTR["Trends Router<br/>GET /api/v1/trends"]
     end
 
-    subgraph svc["Service Layer<br/>(routers → services → DB)"]
-        TS[TweetService<br/>create, hashtag, fan-out dispatch]
-        TLS[TimelineService<br/>sorted-set merge, cursor pagination]
-        US[UserService<br/>CRUD, follow/unfollow, counters]
-        SS[SearchService<br/>FTS tsquery, ranked UNION]
-        TRS[TrendingService<br/>velocity scoring, ZSET update]
+    subgraph svc["Service Layer"]
+        TS["TweetService<br/>create · hashtag extract · fan-out enqueue"]
+        TLS["TimelineService<br/>Redis ZSET read · Postgres fallback · cursor paginate"]
+        US["UserService<br/>CRUD · follow/unfollow · counter update · backfill"]
+        SS["SearchService<br/>websearch_to_tsquery · ranked UNION · recency decay"]
+        TRS["TrendingService<br/>velocity scoring · windowed count merge"]
     end
 
     subgraph store["PostgreSQL 16"]
-        PG[(users, tweets, hashtags,<br/>tweet_hashtags, follows<br/>+ GIN FTS indexes)]
+        PG[("users · tweets · hashtags · tweet_hashtags · follows<br/>+ GIN indexes on fts_vector columns")]
     end
 
     subgraph cache["Redis 7"]
-        RD[(timeline:{uid} ZSETs<br/>trends:{window} ZSETs<br/>fanout_queue list)]
+        RD[("timeline:{uid} ZSETs · fanout_queue list<br/>trends:{w} ZSETs · trends:{w}:counts ZSETs")]
     end
 
     subgraph bg["Background asyncio tasks"]
-        FO[FanOutWorker<br/>500ms BRPOP → pipeline ZADD]
-        TW[TrendingWorker<br/>60s poll → velocity scores]
+        FO["FanOutWorker<br/>500ms BRPOP → pipeline ZADD"]
+        TW["TrendingWorker<br/>60s → velocity scores → ZADD"]
     end
 
     RT --> TS
@@ -131,87 +94,123 @@ graph TB
     class FO,TW bg
 ```
 
-## Data model
+**Layering:** Routers parse HTTP and validate with Pydantic, then delegate to services — routers contain
+zero business logic. Services own domain logic and data access. Redis caches pre-computed timelines
+per user as sorted sets (`timeline:{user_id}`) and trending scores (`trends:{window}`); all
+authoritative state lives in PostgreSQL. Fan-out and trending computation run as in-process `asyncio`
+background tasks — no separate worker containers.
 
-```
-User        — user_id (PK, UUIDv4), username (unique, ≤15), display_name,
-               follower_count, following_count (denormalized), created_at
-Tweet       — tweet_id (PK, UUIDv4), author_id (FK → User), text (≤280),
-               fts_vector (GIN-indexed generated column), created_at
-Hashtag     — hashtag_id (PK, UUIDv4), name (unique), fts_vector (GIN-indexed)
-TweetHashtag — (tweet_id, hashtag_id) join table
-Follow      — (follower_id, followee_id) with UNIQUE constraint for idempotency
-```
+## API
 
-## Test suite
+| Method | Path | Purpose | Status codes |
+|--------|------|---------|-------------|
+| `GET` | `/healthz` | Health check | 200 |
+| `POST` | `/api/v1/users` | Create user (username, optional display_name) | 201, 409, 422 |
+| `GET` | `/api/v1/users/{id}` | Get user profile | 200, 404 |
+| `GET` | `/api/v1/users/{id}/tweets` | Profile timeline (cursor-paginated) | 200, 400, 404 |
+| `POST` | `/api/v1/users/{id}/follow?follower_id=` | Follow a user (idempotent) | 200, 404, 422 |
+| `DELETE` | `/api/v1/users/{id}/follow?follower_id=` | Unfollow a user (idempotent) | 200, 404 |
+| `POST` | `/api/v1/tweets` | Create tweet with text + optional hashtags | 201, 404, 422 |
+| `GET` | `/api/v1/tweets/{id}` | Get tweet detail with author + hashtags | 200, 404 |
+| `GET` | `/api/v1/timeline/home?user_id=` | Home timeline (cursor-paginated, 20/page) | 200, 404 |
+| `GET` | `/api/v1/search?q=` | Full-text search across tweets and hashtags | 200 |
+| `GET` | `/api/v1/trends?window=1h\|24h&limit=` | Velocity-ranked trending topics | 200, 422 |
 
-### White-box unit tests (11 tests, 11 passing)
+All IDs are UUIDv4. All timestamps are ISO 8601. All endpoints are prefixed `/api/v1` except `/healthz`.
 
-Run via `pytest` with in-memory SQLite (no external deps):
+### Cursor pagination
 
-```bash
-docker compose exec app python -m pytest tests/ -v
-```
+Timeline and search endpoints use opaque base64-encoded JSON cursors for stable infinite-scroll
+pagination. Each response returns `next_cursor` (or `null` for the last page). Offset-based
+pagination is not used — cursor pagination is O(log N) regardless of page depth.
 
-| File | What it covers |
-|------|---------------|
-| `tests/test_healthz.py` | GET /healthz returns 200 + `{"status":"ok"}` |
+## Environment variables
 
-### Black-box acceptance tests (7 suites, ~25 tests)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_PORT` | `8010` | Host port mapped to the app container |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@db:5432/twitter_x` | PostgreSQL connection |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection string |
 
-Run against the running stack:
+Set these in `.env` (copy from `.env.example`). The stack works out of the box with defaults.
 
-```bash
-API_BASE_URL=http://localhost:8040 python -m pytest verify/acceptance -v
-```
+## Services
 
-| File | FR | What it asserts |
-|------|----|-----------------|
-| `verify/acceptance/test_healthz.py` | Health | GET /healthz → 200 |
-| `verify/acceptance/test_fr1_post_tweet.py` | FR1 | Tweet creation with hashtags, 422 for empty/long text, 404 for unknown author |
-| `verify/acceptance/test_fr2_home_timeline.py` | FR2 | Timeline returns followed users' tweets, reverse-chronological, cursor pagination |
-| `verify/acceptance/test_fr3_profile_timeline.py` | FR3 | Profile shows only that user's tweets, paginated |
-| `verify/acceptance/test_fr4_search.py` | FR4 | FTS keyword + hashtag search, ranked results, empty query → empty |
-| `verify/acceptance/test_fr5_follow.py` | FR5 | Follow/unfollow idempotent, counter updates, self-follow 422 |
-| `verify/acceptance/test_fr6_trending.py` | FR6 | Velocity-ranked trends, window validation, ordered scores |
+| Service | Image | Internal port | Health check |
+|---------|-------|---------------|--------------|
+| `db` | `postgres:16-alpine` | 5432 | `pg_isready -U postgres` |
+| `redis` | `redis:7-alpine` | 6379 | `redis-cli ping` |
+| `app` | (built from `Dockerfile`) | 8000 | `curl -sf http://localhost:8000/healthz` |
 
-### CI/CD
+Only `app` publishes a host port (default 8010). `db` and `redis` are compose-internal.
+
+## CI/CD
 
 Three GitHub Actions workflows in `.github/workflows/`:
 
-| Workflow | Trigger | What it checks |
-|----------|---------|---------------|
-| `lint.yml` | PR + push to main | `ruff check` + `ruff format --check` |
-| `ci.yml` | PR + push to main | Unit tests (against Postgres service) + Docker build |
-| `functional.yml` | PR + push to main | Full stack up → acceptance tests → teardown |
+| Workflow | File | What it runs |
+|----------|------|-------------|
+| **lint** | `lint.yml` | `ruff check` + `ruff format --check` on `src/ tests/ verify/` |
+| **ci** | `ci.yml` | Unit tests (Postgres service) + Docker build |
+| **functional** | `functional.yml` | `docker compose up` → migrations → acceptance tests → teardown |
+
+All workflows trigger on PR + push to `main` and a daily scheduled run.
+
+## Test inventory
+
+### White-box unit tests (`tests/`)
+
+- **test_healthz.py** — 1 case: verifies `GET /healthz` returns 200 with `{"status":"ok"}` via ASGI transport (in-memory, no DB required).
+
+### Black-box acceptance tests (`verify/acceptance/`)
+
+| File | FR | Cases |
+|------|-----|-------|
+| `test_healthz.py` | Health check | 1 |
+| `test_fr_user_crud.py` | User CRUD | 8 |
+| `test_fr1_post_tweet.py` | FR1 — Post tweet | 12 |
+| `test_fr2_home_timeline.py` | FR2 — Home timeline | 7 |
+| `test_fr3_profile_timeline.py` | FR3 — Profile timeline | 5 |
+| `test_fr4_search.py` | FR4 — Search | 9 |
+| `test_fr5_follow.py` | FR5 — Follow/unfollow | 9 |
+| `test_fr6_trending.py` | FR6 — Trending | 7 |
+
+**Total: 58 test cases across 8 suites.** All tests are black-box (no `import` of the app) — they
+exercise the system via HTTP.
+
+## Degraded mode
+
+The app starts and operates without Redis. When Redis is unavailable:
+- Fan-out is skipped (timeline cache stays cold)
+- Timeline reads fall back to Postgres
+- Trending returns empty results
+- All core CRUD and search operations work normally
+
+On Redis reconnect, operations resume automatically.
 
 ## Project layout
 
 ```
-src/twitter_x/
-├── main.py              # create_app() factory, lifespan, /healthz
-├── config.py            # pydantic-settings, env-driven
-├── database.py          # async engine/session factory
-├── redis.py             # Redis client (gracefully handles unavailable)
-├── models/              # SQLAlchemy ORM — User, Tweet, Hashtag, Follow
-├── schemas/             # Pydantic — request/response models
-├── routers/             # FastAPI — 6 endpoints (health, users, tweets, timeline, search, trends)
-├── services/            # Business logic (stubs ready for extraction)
-└── workers/             # asyncio tasks — fan-out (500ms), trending (60s)
+sd-twitter-x-backend/
+├── src/twitter_x/
+│   ├── main.py                 # create_app() factory, lifespan, router registration
+│   ├── config.py               # pydantic-settings (DATABASE_URL, REDIS_URL, APP_PORT)
+│   ├── database.py             # async engine/session factory, get_session dependency
+│   ├── redis.py                # Redis client with graceful None fallback
+│   ├── models/                 # SQLAlchemy ORM (User, Tweet, Hashtag, TweetHashtag, Follow)
+│   ├── schemas/                # Pydantic request/response models
+│   ├── routers/                # FastAPI routers (thin — parse, delegate, return)
+│   ├── services/               # Business-logic layer (TweetService, TimelineService, etc.)
+│   └── workers/                # Background asyncio tasks (FanOutWorker, TrendingWorker)
+├── tests/                      # White-box unit tests (ASGI transport)
+├── verify/acceptance/          # Black-box acceptance tests (HTTP, one suite per FR)
+├── alembic/                    # Database migrations (schema + recency_decay function)
+├── .github/workflows/          # CI/CD (lint, ci, functional)
+├── Dockerfile                  # Multi-stage build (python:3.12-slim)
+├── docker-compose.yml          # 3 services: db, redis, app
+├── .env.example                # Environment variable template (all commented)
+├── DEPLOY.md                   # Deploy runbook
+├── DESIGN.md                   # Full design document
+├── pyproject.toml              # Project metadata + tool config
+└── requirements.txt            # Pinned dependencies
 ```
-
-## Configuration
-
-The app is configured entirely through environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APP_PORT` | `8040` | Host-side port mapped to in-container `8000` |
-| `DATABASE_URL` | `postgresql+asyncpg://twitter_x:twitter_x@db:5432/twitter_x` | Postgres DSN |
-| `REDIS_URL` | `redis://redis:6379/0` | Redis DSN |
-
-Set via `.env` file or `environment:` in compose. Secrets (`DATABASE_URL` credentials) belong in `.env` — never committed.
-
-## Out of scope (MVP)
-
-Media uploads, Kafka/event streaming, celebrity push/pull fan-out, Snowflake IDs, soft deletes/tweet deletion, authentication, DMs, Spaces, X Premium, rate limiting, multi-device sync.

@@ -1,33 +1,33 @@
-# Builder stage
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim AS builder
 
-ENV PYTHONUNBUFFERED=1
+WORKDIR /app
 
-WORKDIR /build
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PIP_DEFAULT_TIMEOUT=100 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
 
-COPY pyproject.toml requirements.txt ./
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY pyproject.toml .
 COPY src/ src/
+RUN pip install --no-cache-dir .
 
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt && \
-    /opt/venv/bin/pip install --no-cache-dir alembic
-
-# Runtime stage
+# --- Runtime stage ---
 FROM python:3.12-slim
 
-ENV PYTHONUNBUFFERED=1
-ENV PATH="/opt/venv/bin:$PATH"
-# src-layout: package lives at /app/src/<pkg>; make it importable for `uvicorn <pkg>.main:app`
-ENV PYTHONPATH=/app/src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set WORKDIR before the relative COPYs so alembic.ini / alembic/ land in /app
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-COPY alembic.ini ./
-COPY alembic/ alembic/
-COPY src/ src/
-COPY pyproject.toml requirements.txt ./
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 

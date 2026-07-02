@@ -1,19 +1,18 @@
-"""Trending worker — background asyncio task: compute velocity scores every 60s."""
+from __future__ import annotations
 
 import asyncio
+import logging
 import math
-from collections.abc import Callable, Coroutine
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
-from redis.asyncio import Redis
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from twitter_x.database import async_session_factory
 from twitter_x.models.hashtag import Hashtag, TweetHashtag
 from twitter_x.models.tweet import Tweet
+from twitter_x.redis import get_redis
 
-StopFn = Callable[[], Coroutine[Any, Any, None]]
+logger = logging.getLogger(__name__)
 
 WINDOWS = {
     "1h": timedelta(hours=1),
@@ -21,93 +20,108 @@ WINDOWS = {
 }
 
 
-async def trending_worker_lifespan(
-    redis: Redis | None,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> StopFn:
-    """Start the trending computation background task. Returns a stop callback.
+class TrendingWorker:
+    """Background asyncio task: 60s poll → velocity scores → Redis ZSET."""
 
-    Every 60s, counts hashtag occurrences in two sliding windows
-    (recent and baseline) and computes velocity scores:
-      score = count_recent / max(count_baseline, 1) * log(1 + count_recent)
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
 
-    Results are written to Redis sorted sets ``trends:1h`` and ``trends:24h``.
-    If Redis is unavailable, computation is skipped but the worker keeps polling.
-    """
-    stop_event = asyncio.Event()
+    async def start(self) -> None:
+        await asyncio.sleep(5)  # Initial delay for DB/Redis readiness
+        self._task = asyncio.create_task(self._run())
 
-    async def _compute_window(
-        session: AsyncSession,
-        window_key: str,
-        window_delta: timedelta,
-    ) -> None:
-        if redis is None:
-            return
-
-        now = datetime.now(datetime.UTC)
-        recent_start = now - window_delta
-        baseline_start = now - 2 * window_delta
-        baseline_end = now - window_delta
-
-        async def _count_hashtags(since: datetime, until: datetime) -> dict[str, int]:
-            stmt = (
-                select(Hashtag.name, func.count(Hashtag.name).label("cnt"))
-                .select_from(TweetHashtag)
-                .join(Tweet, TweetHashtag.tweet_id == Tweet.tweet_id)
-                .join(Hashtag, TweetHashtag.hashtag_id == Hashtag.hashtag_id)
-                .where(Tweet.created_at >= since, Tweet.created_at < until)
-                .group_by(Hashtag.name)
-            )
-            result = await session.execute(stmt)
-            return {row.name: row.cnt for row in result.all()}
-
-        recent = await _count_hashtags(recent_start, now)
-        baseline = await _count_hashtags(baseline_start, baseline_end)
-
-        pipe = redis.pipeline()
-        # Delete old scores and counts before repopulating
-        pipe.delete(f"trends:{window_key}")
-        pipe.delete(f"trends:{window_key}:counts")
-
-        all_names = set(recent.keys()) | set(baseline.keys())
-        for name in all_names:
-            r = recent.get(name, 0)
-            b = baseline.get(name, 0)
-            score = (r / max(b, 1)) * math.log(1 + r)
-            if score > 0:
-                pipe.zadd(f"trends:{window_key}", {name: score})
-                pipe.zadd(f"trends:{window_key}:counts", {name: r})
-
-        await pipe.execute()
-
-    async def _run() -> None:
-        # Sleep a bit on startup to let DB/Redis settle
-        await asyncio.sleep(5)
-
-        while not stop_event.is_set():
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
             try:
-                async with session_factory() as session:
-                    for window_key, window_delta in WINDOWS.items():
-                        await _compute_window(session, window_key, window_delta)
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _run(self) -> None:
+        """Main loop: compute velocity scores every 60s."""
+        while True:
+            try:
+                await self._tick()
             except asyncio.CancelledError:
                 break
             except Exception:
-                pass
+                logger.exception("TrendingWorker error — retrying in 10s")
+                await asyncio.sleep(10)
+                continue
 
-            # Sleep 60s between computations
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=60)
-            except TimeoutError:
-                pass
+            await asyncio.sleep(60)
 
-    task = asyncio.create_task(_run())
+    async def _tick(self) -> None:
+        """Compute velocity scores for all windows."""
+        now = datetime.now(timezone.utc)
 
-    async def _stop() -> None:
-        stop_event.set()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for window_name, window_delta in WINDOWS.items():
+            scores = await self._compute_window(window_name, window_delta, now)
+            if scores:
+                redis = await get_redis()
+                if redis is None:
+                    return
 
-    return _stop
+                trends_key = f"trends:{window_name}"
+                counts_key = f"trends:{window_name}:counts"
+
+                pipeline = redis.pipeline()
+                pipeline.delete(trends_key)
+                pipeline.delete(counts_key)
+
+                for name, velocity, count in scores:
+                    pipeline.zadd(trends_key, {name: velocity})
+                    pipeline.zadd(counts_key, {name: count})
+
+                await pipeline.execute()
+
+                logger.debug(
+                    "TrendingWorker: %s — %d hashtags scored",
+                    window_name,
+                    len(scores),
+                )
+
+    async def _compute_window(
+        self, window_name: str, window_delta: timedelta, now: datetime
+    ) -> list[tuple[str, float, int]]:
+        """Compute velocity scores for a time window."""
+        recent_start = now - window_delta
+        baseline_start = now - 2 * window_delta
+
+        async with async_session_factory() as db:
+            # Get recent tweet counts per hashtag
+            recent_counts = await self._count_hashtags_in_range(db, recent_start, now)
+            baseline_counts = await self._count_hashtags_in_range(db, baseline_start, recent_start)
+
+        if not recent_counts:
+            return []
+
+        scores = []
+        for name, recent in recent_counts.items():
+            baseline = baseline_counts.get(name, 0)
+            velocity = (recent / max(baseline, 1)) * math.log(1 + recent)
+            scores.append((name, velocity, recent))
+
+        # Sort by velocity descending
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores
+
+    async def _count_hashtags_in_range(self, db, start: datetime, end: datetime) -> dict[str, int]:
+        """Count hashtag occurrences in a time range."""
+        stmt = (
+            select(Hashtag.name, func.count(TweetHashtag.tweet_id).label("count"))
+            .join(TweetHashtag, TweetHashtag.hashtag_id == Hashtag.hashtag_id)
+            .join(
+                Tweet,
+                Tweet.tweet_id == TweetHashtag.tweet_id,
+            )
+            .where(
+                Tweet.created_at >= start,
+                Tweet.created_at < end,
+            )
+            .group_by(Hashtag.name)
+        )
+        result = await db.execute(stmt)
+        return {row[0]: row[1] for row in result}

@@ -1,23 +1,14 @@
-# Functional — black-box acceptance against running stack
-# Starts the full stack (postgres + redis + app) via docker compose, runs the
-# acceptance test suite, then tears everything down.
-
 name: functional
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  push:
     branches: [main]
   schedule:
     - cron: "17 13 * * *"
 
-concurrency:
-  group: functional-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
-  APP_PORT: 8040
+  APP_PORT: 8010
 
 jobs:
   acceptance:
@@ -25,48 +16,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and start stack
+      - name: Install docker compose
         run: |
-          cp .env.example .env
-          APP_PORT=${{ env.APP_PORT }} docker compose up --build -d
+          sudo apt-get update
+          sudo apt-get install -y docker-compose-plugin
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bootstrap .env from example
+        run: cp .env.example .env
+
+      - name: Build and start stack
+        run: docker compose up -d --build
+
+      - name: Run migrations
+        run: docker compose run --rm app alembic upgrade head
 
       - name: Wait for health
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:${{ env.APP_PORT }}/healthz; then
-              echo "Stack is healthy"
+            if curl -sf http://localhost:${{ env.APP_PORT }}/healthz > /dev/null 2>&1; then
+              echo "App is healthy"
               break
             fi
-            echo "Waiting for stack... ($i/30)"
-            sleep 3
+            echo "Waiting for app... ($i)"
+            sleep 2
           done
-          curl -sf http://localhost:${{ env.APP_PORT }}/healthz || {
-            echo "Stack failed to become healthy"
-            docker compose logs app --tail=50
-            docker compose logs db --tail=20
-            docker compose logs redis --tail=20
-            exit 1
-          }
+          curl -sf http://localhost:${{ env.APP_PORT }}/healthz || (echo "App failed to start" && exit 1)
 
-      - name: Run migrations
-        run: docker compose exec -T app alembic upgrade head
+      - name: Install acceptance test deps
+        run: pip install httpx pytest
 
-      - name: Install test deps
-        run: |
-          pip install pytest httpx
+      - name: Run acceptance tests
+        run: API_BASE_URL="http://localhost:${{ env.APP_PORT }}" python -m pytest verify/acceptance -v
+        env:
+          API_BASE_URL: "http://localhost:${{ env.APP_PORT }}"
 
-      - name: Acceptance tests
-        run: |
-          API_BASE_URL="http://localhost:${{ env.APP_PORT }}" \
-            python -m pytest verify/acceptance -v --tb=short
-
-      - name: Stack logs (on failure)
+      - name: Dump logs on failure
         if: failure()
-        run: |
-          docker compose logs app --tail=100
-          docker compose logs db --tail=50
-          docker compose logs redis --tail=50
+        run: docker compose logs app --tail=100
 
-      - name: Tear down
+      - name: Teardown
         if: always()
-        run: APP_PORT=${{ env.APP_PORT }} docker compose down --volumes --remove-orphans
+        run: docker compose down --volumes --remove-orphans

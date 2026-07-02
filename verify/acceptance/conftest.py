@@ -44,9 +44,9 @@ def fresh_uuid():
 
 def assert_status(r, expected_status):
     """Assert status and return parsed JSON."""
-    assert r.status_code == expected_status, (
-        f"Expected {expected_status}, got {r.status_code}: {r.text}"
-    )
+    assert (
+        r.status_code == expected_status
+    ), f"Expected {expected_status}, got {r.status_code}: {r.text}"
     if r.status_code == 204:
         return None
     return r.json()

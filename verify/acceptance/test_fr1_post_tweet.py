@@ -57,6 +57,21 @@ def test_create_tweet_with_client_hashtags(client):
     assert hashtag_names == {"vibes", "sunny"}
 
 
+def test_create_tweet_with_text_and_client_hashtags(client):
+    """Hashtags from text and client-supplied array are merged and deduplicated."""
+    user = create_user(client)
+    body = create_tweet(
+        client,
+        user["user_id"],
+        text="loving #rust and #python",
+        hashtags=["python", "golang"],  # 'python' overlaps with text
+    )
+
+    hashtag_names = {h["name"] for h in body["hashtags"]}
+    # rust + python (from text, python also in client → deduped) + golang (client only)
+    assert hashtag_names == {"rust", "python", "golang"}
+
+
 def test_hashtag_deduplication(client):
     """Tweets with the same hashtag reuse the existing hashtag row."""
     user = create_user(client)

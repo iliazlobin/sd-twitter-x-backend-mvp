@@ -1,159 +1,106 @@
-# Deploy — Twitter/X MVP
-
-Slug: `twitter-x`
+# Twitter/X Backend MVP — Deploy
 
 ## Prerequisites
 
-- Docker Engine 24+ with Compose plugin (`docker compose version`)
-- curl (for healthcheck probes)
+- Docker & Docker Compose (v2.22+)
 - A running Docker daemon
-- Port 8040 free on the host (overridable via `APP_PORT`)
+- Port 8010 free on the host (overridable via `APP_PORT`)
 
-## Quick Start — From Clean Checkout to Running
+## Quick start (compose)
 
 ```bash
-# 1. Clone / cd into the project
-cd /path/to/twitter-x
+# 1. Clone the repository
+git clone <repo-url> sd-twitter-x-backend
+cd sd-twitter-x-backend
 
-# 2. Copy the env template (optional — built-in defaults work)
+# 2. Bootstrap environment (edit .env to override defaults)
 cp .env.example .env
 
-# 3. Build and start the full stack (app + postgres + redis)
-#    APP_PORT controls the host-side port; in-container port is always 8000.
-APP_PORT=8040 docker compose up --build -d
+# 3. Build and start all services
+docker compose up -d --build
 
-# 4. Wait for startup (health checks auto-sequence: postgres → redis → app)
-sleep 15
+# 4. Run database migrations (Alembic owns the schema)
+docker compose run --rm app alembic upgrade head
 
-# 5. Verify the stack is healthy
-curl -sf http://localhost:8040/healthz
-# → {"status":"ok"}
-
-# 6. Run database migrations
-docker compose exec app alembic upgrade head
-
-# 7. Quick functional smoke test — create a user and a tweet
-curl -sf http://localhost:8040/api/v1/users \
-  -H 'Content-Type: application/json' \
-  -d '{"username": "smoke_test"}'
-# → {"user_id":"...","username":"smoke_test"}
-
-# Grab the user_id from the response and create a tweet:
-curl -sf http://localhost:8040/api/v1/tweets \
-  -H 'Content-Type: application/json' \
-  -d '{"author_id":"<user_id>","text":"hello twitter-x MVP","hashtags":["mvp","test"]}'
-# → {"tweet_id":"...","text":"hello twitter-x MVP",...}
-
-# Search for the tweet:
-curl -sf "http://localhost:8040/api/v1/search?q=hello"
-# → {"tweets":[...],"next_cursor":null}
-
-# Check trending topics:
-curl -sf "http://localhost:8040/api/v1/trends?window=1h&limit=10"
-# → {"trends":[...],"next_cursor":null}
+# 5. Verify the app is healthy
+curl -sf http://localhost:8010/healthz
+# Expected: {"status":"ok"}
 ```
 
-> Note: The `lifespan` handler in `main.py` auto-creates tables on startup via `Base.metadata.create_all()`, so in many cases migrations aren't strictly needed. The alembic path is still available for schema versioning.
+The stack is now serving on `http://localhost:8010`.
 
-## Port Configuration
+## Environment variables
 
-| Variable   | Default | Description                                    |
-|-----------|---------|------------------------------------------------|
-| `APP_PORT` | `8040`  | Host-side port mapped to in-container `8000`   |
+All values are optional — the stack works out of the box with compose-provided infrastructure.
 
-```bash
-# Run on a different port
-APP_PORT=8050 docker compose up -d
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_PORT` | `8010` | Host port mapped to the app container (port 8000 in-container) |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@db:5432/twitter_x` | PostgreSQL connection string |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection string |
 
-## Environment
+Set these in `.env` (copy from `.env.example`). The compose file reads `.env` automatically.
 
-The app is configured entirely through environment variables:
+## Services
 
-```bash
-cp .env.example .env
-# Edit .env to override defaults — the example has all variable names
-```
+| Service | Image | Internal port | Health check |
+|---------|-------|---------------|--------------|
+| `db` | `postgres:16-alpine` | 5432 | `pg_isready -U postgres` |
+| `redis` | `redis:7-alpine` | 6379 | `redis-cli ping` |
+| `app` | (built from `Dockerfile`) | 8000 | `curl -sf http://localhost:8000/healthz` |
 
-The `docker-compose.yml`'s `environment:` block sets the critical values
-(`DATABASE_URL`, `REDIS_URL`). The `.env` file augments these with optional
-settings.
-
-Secrets (`DATABASE_URL` credentials) belong in `.env` — never committed to the repo.
-
-## Health Checks
-
-Every service has a Docker HEALTHCHECK. Compose dependency waits ensure
-the stack doesn't start serving before PostgreSQL and Redis are ready.
-
-| Service | Healthcheck command                                              | Interval |
-|---------|------------------------------------------------------------------|----------|
-| db      | `pg_isready -U twitter_x`                                        | 5s       |
-| redis   | `redis-cli ping`                                                 | 5s       |
-| app     | `python -c "import urllib.request; ..." http://localhost:8000/healthz` | 10s      |
-
-To manually probe:
-
-```bash
-docker inspect --format='{{.State.Health.Status}}' twitter-x-db
-docker inspect --format='{{.State.Health.Status}}' twitter-x-redis
-docker inspect --format='{{.State.Health.Status}}' twitter-x-app
-```
-
-The health endpoint returns `{"status":"ok"}` when the app is reachable.
+Only `app` publishes a host port. `db` and `redis` are compose-internal.
 
 ## Logs
 
 ```bash
-# Follow app logs
-docker compose logs -f app
+# All services
+docker compose logs -f
 
-# Tail recent logs
-docker compose logs app --tail=100
+# App only (most useful)
+docker compose logs app --tail=100 -f
+
+# Database
 docker compose logs db --tail=50
-docker compose logs redis --tail=50
 ```
 
-## Testing
+## Teardown
 
 ```bash
-# White-box unit tests (uses in-memory SQLite — no external deps needed)
-docker compose exec app python -m pytest tests/ -v
+# Stop and remove containers, volumes (wipes DB data)
+docker compose down --volumes --remove-orphans
 
-# Lint (ruff)
-pip install ruff==0.15.20
-ruff check src/ tests/ verify/
-ruff format --check src/ tests/ verify/
-
-# Black-box acceptance tests (requires running stack on APP_PORT)
-API_BASE_URL="http://localhost:8040" python -m pytest verify/acceptance -v
+# Stop without removing volumes (data preserved)
+docker compose down
 ```
 
 ## CI/CD
 
-Three GitHub Actions workflows live in `.github/workflows/`:
+Three GitHub Actions workflows in `.github/workflows/`:
 
-| Workflow         | Trigger             | What it does                                              |
-|-----------------|---------------------|-----------------------------------------------------------|
-| `lint.yml`      | PR + push to `main` | `ruff check` + `ruff format --check`                      |
-| `ci.yml`        | PR + push to `main` | Install deps, run unit tests, build Docker image          |
-| `functional.yml` | PR + push to `main` | `docker compose up`, run acceptance tests, `docker compose down` |
+| Workflow | Trigger | What it runs |
+|----------|---------|-------------|
+| `lint.yml` | PR + push to `main` + daily | `ruff check` + `ruff format --check` |
+| `ci.yml` | PR + push to `main` + daily | Unit tests (Postgres service) + Docker build |
+| `functional.yml` | PR + push to `main` + daily | `docker compose up` → migrations → acceptance tests → teardown |
 
-All three must pass before a PR can merge.
-
-## Stop & Cleanup
+## Manual testing (host-only, not auto-verified)
 
 ```bash
-# Stop containers (keeps volumes — Postgres data persists)
-docker compose down
+# Create a user
+curl -s -X POST http://localhost:8010/api/v1/users \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"testuser","display_name":"Test User"}'
 
-# Full teardown (wipes all data)
-docker compose down --volumes --remove-orphans
+# Post a tweet
+curl -s -X POST http://localhost:8010/api/v1/tweets \
+  -H 'Content-Type: application/json' \
+  -d '{"author_id":"<user-uuid>","text":"Hello #world"}'
 ```
 
-## Production Notes
+## Troubleshooting
 
-- Use a managed Postgres instance with automated backups.
-- Pin Redis persistence (AOF + RDB) if timeline cache must survive restarts.
-- The `pgdata` volume stores all database state — back it up regularly.
-- In-process fan-out is single-node only; scale-out requires a separate fan-out worker service.
+- **App crash-loops**: `docker compose logs app --tail=50` — common cause: missing `.env` or stale volume
+- **Migration fails**: ensure the compose stack is fully up: `docker compose ps` should show all services healthy
+- **Port conflict**: set `APP_PORT` to an unused port in `.env`, e.g. `APP_PORT=8011`
+- **Schema issues**: run `docker compose run --rm app alembic upgrade head` to sync migrations

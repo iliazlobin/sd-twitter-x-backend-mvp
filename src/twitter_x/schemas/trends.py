@@ -1,15 +1,17 @@
-import uuid
+from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from uuid import UUID
+
+from pydantic import BaseModel
 
 
 class TrendItem(BaseModel):
-    hashtag_id: uuid.UUID
+    hashtag_id: UUID | None = None
     name: str
     velocity_score: float
     tweet_count: int
 
 
 class TrendsResponse(BaseModel):
+    window: str
     trends: list[TrendItem]
-    window: str = Field(default="1h")

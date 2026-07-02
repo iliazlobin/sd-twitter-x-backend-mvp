@@ -1,123 +1,57 @@
-import json
-import uuid
+from __future__ import annotations
+
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from redis.asyncio import Redis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from twitter_x.database import get_session
-from twitter_x.models.hashtag import Hashtag, TweetHashtag
-from twitter_x.models.tweet import Tweet
-from twitter_x.models.user import User
-from twitter_x.redis import get_redis
-from twitter_x.schemas.tweet import HashtagItem, TweetCreate, TweetDetail, TweetResponse
+from twitter_x.schemas.tweet import TweetCreate, TweetDetail, TweetResponse
+from twitter_x.services.tweet_service import (
+    create_tweet as create_tweet_svc,
+)
+from twitter_x.services.tweet_service import (
+    get_tweet_detail as get_tweet_detail_svc,
+)
+from twitter_x.services.tweet_service import (
+    get_tweet_hashtags,
+)
 
-router = APIRouter(prefix="/api/v1/tweets", tags=["tweets"])
-
-
-def _extract_hashtags(text: str) -> set[str]:
-    """Extract unique lowercased hashtag names from tweet text."""
-    import re
-
-    return {tag.lower() for tag in re.findall(r"#(\w+)", text)}
+tweets_router = APIRouter(prefix="/api/v1/tweets", tags=["tweets"])
 
 
-def _created_at_epoch(ts) -> float:
-    """Convert a datetime to epoch seconds for Redis ZSET score."""
-    return ts.timestamp()
-
-
-@router.post("", status_code=201)
+@tweets_router.post("", status_code=201, response_model=TweetResponse)
 async def create_tweet(
     body: TweetCreate,
-    session: AsyncSession = Depends(get_session),
-    redis: Redis | None = Depends(get_redis),
+    db: AsyncSession = Depends(get_session),
 ) -> TweetResponse:
-    author = await session.get(User, body.author_id)
-    if not author:
-        raise HTTPException(status_code=404, detail="Author not found")
+    """Create a new tweet with optional hashtags."""
+    try:
+        tweet = await create_tweet_svc(db, body)
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        await db.rollback()
+        raise
 
-    # Extract hashtags from text and merge with client-supplied
-    tag_names = _extract_hashtags(body.text)
-    if body.hashtags:
-        tag_names.update(h.lower() for h in body.hashtags)
-
-    tweet = Tweet(author_id=body.author_id, text=body.text)
-    session.add(tweet)
-    await session.flush()
-
-    hashtag_items: list[HashtagItem] = []
-    for name in tag_names:
-        stmt = select(Hashtag).where(Hashtag.name == name)
-        result = await session.execute(stmt)
-        hashtag = result.scalar_one_or_none()
-        if not hashtag:
-            hashtag = Hashtag(name=name)
-            session.add(hashtag)
-            await session.flush()
-
-        session.add(TweetHashtag(tweet_id=tweet.tweet_id, hashtag_id=hashtag.hashtag_id))
-        hashtag_items.append(HashtagItem(hashtag_id=hashtag.hashtag_id, name=hashtag.name))
-
-    await session.commit()
-    await session.refresh(tweet)
-
-    # Fire-and-forget fan-out dispatch to Redis queue
-    if redis is not None:
-        try:
-            fanout_payload = json.dumps(
-                {
-                    "author_id": str(tweet.author_id),
-                    "tweet_id": str(tweet.tweet_id),
-                    "created_at": _created_at_epoch(tweet.created_at),
-                }
-            )
-            await redis.lpush("fanout_queue", fanout_payload)
-        except Exception:
-            # Fan-out dispatch is best-effort; timeline will still work
-            # via Postgres fallback on the next read.
-            pass
-
+    hashtags = await get_tweet_hashtags(db, tweet.tweet_id)
     return TweetResponse(
         tweet_id=tweet.tweet_id,
         author_id=tweet.author_id,
         text=tweet.text,
-        hashtags=hashtag_items,
+        hashtags=[{"hashtag_id": h.hashtag_id, "name": h.name} for h in hashtags],
         created_at=tweet.created_at,
     )
 
 
-@router.get("/{tweet_id}")
+@tweets_router.get("/{tweet_id}", response_model=TweetDetail)
 async def get_tweet(
-    tweet_id: uuid.UUID,
-    session: AsyncSession = Depends(get_session),
+    tweet_id: UUID,
+    db: AsyncSession = Depends(get_session),
 ) -> TweetDetail:
-    stmt = (
-        select(Tweet)
-        .where(Tweet.tweet_id == tweet_id)
-        .options(
-            selectinload(Tweet.author),
-            selectinload(Tweet.hashtags).selectinload(TweetHashtag.hashtag),
-        )
-    )
-    result = await session.execute(stmt)
-    tweet = result.scalar_one_or_none()
-    if not tweet:
+    """Get a tweet by ID with author and hashtags."""
+    detail = await get_tweet_detail_svc(db, tweet_id)
+    if detail is None:
         raise HTTPException(status_code=404, detail="Tweet not found")
-
-    return TweetDetail(
-        tweet_id=tweet.tweet_id,
-        text=tweet.text,
-        author={
-            "user_id": tweet.author.user_id,
-            "username": tweet.author.username,
-            "display_name": tweet.author.display_name,
-        },
-        hashtags=[
-            HashtagItem(hashtag_id=th.hashtag.hashtag_id, name=th.hashtag.name)
-            for th in tweet.hashtags
-        ],
-        created_at=tweet.created_at,
-    )
+    return detail
