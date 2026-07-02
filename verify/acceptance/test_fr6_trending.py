@@ -65,5 +65,5 @@ def test_trends_ordered_by_score(client):
         for i in range(len(scores) - 1):
             assert scores[i] >= scores[i + 1], (
                 f"Score at index {i} ({scores[i]}) should be >= "
-                f"score at index {i+1} ({scores[i+1]})"
+                f"score at index {i + 1} ({scores[i + 1]})"
             )

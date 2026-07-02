@@ -108,6 +108,7 @@ def test_create_tweet_280_chars_ok(client):
 
 def test_get_tweet_detail_200(client):
     import uuid
+
     username = f"alice-{uuid.uuid4().hex[:8]}"
     user = create_user(client, username=username)
     tweet = create_tweet(client, user["user_id"], text="test tweet #demo")

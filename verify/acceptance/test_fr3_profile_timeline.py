@@ -19,8 +19,8 @@ from verify.acceptance.conftest import (
 
 def test_profile_timeline_returns_own_tweets(client):
     """Profile timeline contains only the specified user's tweets."""
-    alice = create_user(client, username=f"alice-{__import__("uuid").uuid4().hex[:8]}")
-    bob = create_user(client, username=f"bob-{__import__("uuid").uuid4().hex[:8]}")
+    alice = create_user(client, username=f"alice-{__import__('uuid').uuid4().hex[:8]}")
+    bob = create_user(client, username=f"bob-{__import__('uuid').uuid4().hex[:8]}")
 
     t_alice = create_tweet(client, alice["user_id"], text="alice's tweet")
     create_tweet(client, bob["user_id"], text="bob's tweet")
@@ -35,7 +35,7 @@ def test_profile_timeline_returns_own_tweets(client):
 
 def test_profile_timeline_reverse_chronological(client):
     """Profile tweets are ordered newest first."""
-    user = create_user(client, username=f"chrono-{__import__("uuid").uuid4().hex[:8]}")
+    user = create_user(client, username=f"chrono-{__import__('uuid').uuid4().hex[:8]}")
 
     t1 = create_tweet(client, user["user_id"], text="oldest")
     time.sleep(0.15)
@@ -50,7 +50,7 @@ def test_profile_timeline_reverse_chronological(client):
 
 def test_profile_timeline_cursor_pagination(client):
     """Cursor pagination works for profile timelines."""
-    user = create_user(client, username=f"pager-{__import__("uuid").uuid4().hex[:8]}")
+    user = create_user(client, username=f"pager-{__import__('uuid').uuid4().hex[:8]}")
 
     for i in range(25):
         create_tweet(client, user["user_id"], text=f"tweet {i}")
@@ -71,7 +71,7 @@ def test_profile_timeline_cursor_pagination(client):
 
 def test_profile_timeline_empty_for_new_user(client):
     """A new user with no tweets has an empty profile timeline."""
-    user = create_user(client, username=f"empty-{__import__("uuid").uuid4().hex[:8]}")
+    user = create_user(client, username=f"empty-{__import__('uuid').uuid4().hex[:8]}")
     timeline = get_profile_timeline(client, user["user_id"])
     assert timeline["tweets"] == []
     assert timeline["next_cursor"] is None
