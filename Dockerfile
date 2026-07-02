@@ -17,6 +17,8 @@ FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/opt/venv/bin:$PATH"
+# src-layout: package lives at /app/src/<pkg>; make it importable for `uvicorn <pkg>.main:app`
+ENV PYTHONPATH=/app/src
 
 # Set WORKDIR before the relative COPYs so alembic.ini / alembic/ land in /app
 WORKDIR /app
