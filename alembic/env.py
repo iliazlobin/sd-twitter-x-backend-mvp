@@ -14,6 +14,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 # Alembic Config object
 config = context.config
 
+# Override sqlalchemy.url from DATABASE_URL env var if set
+# This makes alembic work in Docker (where postgres is at "db") and CI (where it's at "localhost")
+db_url = os.environ.get("DATABASE_URL")
+if db_url:
+    config.set_main_option("sqlalchemy.url", db_url)
+
 # Interpret the config file for Python logging
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
