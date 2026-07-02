@@ -125,9 +125,9 @@ def test_search_hashtag_type_results(client):
     results = search_content(client, "solarpunk")
 
     hashtag_results = [r for r in results["results"] if r.get("type") == "hashtag"]
-    assert (
-        len(hashtag_results) >= 1
-    ), f"Expected at least one hashtag result for 'solarpunk', got: {results}"
+    assert len(hashtag_results) >= 1, (
+        f"Expected at least one hashtag result for 'solarpunk', got: {results}"
+    )
     assert hashtag_results[0]["name"] == "solarpunk"
     assert "hashtag_id" in hashtag_results[0]
 
