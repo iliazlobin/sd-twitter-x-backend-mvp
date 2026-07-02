@@ -3,8 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from twitter_x.database import get_engine, get_session_factory
-from twitter_x.models.base import Base
+from twitter_x.database import get_session_factory
 from twitter_x.redis import close_redis, ensure_redis
 from twitter_x.routers import routers
 from twitter_x.workers.fanout_worker import fanout_worker_lifespan
@@ -13,9 +12,8 @@ from twitter_x.workers.trending_worker import trending_worker_lifespan
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    async with get_engine().begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+    # Schema is owned by Alembic (`alembic upgrade head` in CI/deploy); do NOT create_all here —
+    # it races the migration step and raises DuplicateTableError ("relation ... already exists").
     redis = await ensure_redis()
     session_factory = get_session_factory()
 
