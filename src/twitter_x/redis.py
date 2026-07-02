@@ -8,7 +8,8 @@ _redis: aioredis.Redis | None = None
 _redis_initialized: bool = False
 
 
-async def get_redis() -> AsyncGenerator[aioredis.Redis | None, None]:
+async def ensure_redis() -> aioredis.Redis | None:
+    """Lazy-init Redis client. Returns None if Redis is unavailable."""
     global _redis, _redis_initialized  # noqa: PLW0603
     if not _redis_initialized:
         _redis_initialized = True
@@ -17,8 +18,14 @@ async def get_redis() -> AsyncGenerator[aioredis.Redis | None, None]:
                 _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
             except Exception:
                 _redis = None
+    return _redis
+
+
+async def get_redis() -> AsyncGenerator[aioredis.Redis | None, None]:
+    """Dependency for FastAPI endpoints."""
+    redis_client = await ensure_redis()
     try:
-        yield _redis
+        yield redis_client
     finally:
         pass
 

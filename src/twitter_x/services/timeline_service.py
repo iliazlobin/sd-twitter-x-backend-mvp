@@ -36,7 +36,7 @@ class TimelineService:
             tweet_id = uuid.UUID(payload["tweet_id"])
             return created_at, tweet_id
         except (ValueError, KeyError, json.JSONDecodeError):
-            raise HTTPException(status_code=400, detail="Invalid cursor")
+            raise HTTPException(status_code=400, detail="Invalid cursor") from None
 
     async def get_home_timeline(
         self,

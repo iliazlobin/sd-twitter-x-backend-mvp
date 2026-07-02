@@ -1,8 +1,6 @@
 """Shared fixtures for white-box tests."""
 
-import asyncio
 from collections.abc import AsyncGenerator
-from typing import Any
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -10,14 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from twitter_x.models.base import Base
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///file::memory:?cache=shared"
-
-
-@pytest_asyncio.fixture(scope="session")
-def event_loop() -> Any:
-    """Session-scoped event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest_asyncio.fixture(scope="session")

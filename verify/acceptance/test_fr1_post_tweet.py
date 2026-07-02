@@ -107,15 +107,16 @@ def test_create_tweet_280_chars_ok(client):
 
 
 def test_get_tweet_detail_200(client):
-    """Fetching an existing tweet returns full detail with author."""
-    user = create_user(client, username="alice")
+    import uuid
+    username = f"alice-{uuid.uuid4().hex[:8]}"
+    user = create_user(client, username=username)
     tweet = create_tweet(client, user["user_id"], text="test tweet #demo")
 
     detail = get_tweet_detail(client, tweet["tweet_id"])
     assert detail["tweet_id"] == tweet["tweet_id"]
     assert detail["text"] == "test tweet #demo"
     assert detail["author"]["user_id"] == user["user_id"]
-    assert detail["author"]["username"] == "alice"
+    assert detail["author"]["username"] == username
     assert len(detail["hashtags"]) == 1
     assert detail["hashtags"][0]["name"] == "demo"
 

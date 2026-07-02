@@ -22,9 +22,9 @@ from verify.acceptance.conftest import (
 
 def test_timeline_returns_followed_users_tweets(client):
     """Home timeline includes tweets from followed users."""
-    alice = create_user(client, username="alice")
-    bob = create_user(client, username="bob")
-    charlie = create_user(client, username="charlie")
+    alice = create_user(client)  # unique username per run
+    bob = create_user(client)
+    charlie = create_user(client)
 
     # Alice follows Bob
     follow_user(client, bob["user_id"], alice["user_id"])
@@ -45,8 +45,8 @@ def test_timeline_returns_followed_users_tweets(client):
 
 def test_timeline_reverse_chronological(client):
     """Timeline tweets are ordered newest first."""
-    alice = create_user(client, username="alice")
-    bob = create_user(client, username="bob")
+    alice = create_user(client)  # unique username per run
+    bob = create_user(client)
 
     follow_user(client, bob["user_id"], alice["user_id"])
 
@@ -67,15 +67,15 @@ def test_timeline_reverse_chronological(client):
 
 def test_timeline_cursor_pagination(client):
     """Cursor pagination returns pages of 20 and a valid next_cursor."""
-    alice = create_user(client, username="alice")
-    bob = create_user(client, username="bob")
+    alice = create_user(client)  # unique username per run
+    bob = create_user(client)
 
     follow_user(client, bob["user_id"], alice["user_id"])
 
     # Create 25 tweets — should span 2 pages
     for i in range(25):
         create_tweet(client, bob["user_id"], text=f"tweet {i}")
-        time.sleep(0.02)
+        time.sleep(0.05)
 
     page1 = get_home_timeline(client, alice["user_id"])
     assert len(page1["tweets"]) == 20

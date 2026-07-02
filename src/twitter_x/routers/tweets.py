@@ -1,6 +1,8 @@
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -9,6 +11,7 @@ from twitter_x.database import get_session
 from twitter_x.models.hashtag import Hashtag, TweetHashtag
 from twitter_x.models.tweet import Tweet
 from twitter_x.models.user import User
+from twitter_x.redis import get_redis
 from twitter_x.schemas.tweet import HashtagItem, TweetCreate, TweetDetail, TweetResponse
 
 router = APIRouter(prefix="/api/v1/tweets", tags=["tweets"])
@@ -21,10 +24,16 @@ def _extract_hashtags(text: str) -> set[str]:
     return {tag.lower() for tag in re.findall(r"#(\w+)", text)}
 
 
+def _created_at_epoch(ts) -> float:
+    """Convert a datetime to epoch seconds for Redis ZSET score."""
+    return ts.timestamp()
+
+
 @router.post("", status_code=201)
 async def create_tweet(
     body: TweetCreate,
     session: AsyncSession = Depends(get_session),
+    redis: Redis | None = Depends(get_redis),
 ) -> TweetResponse:
     author = await session.get(User, body.author_id)
     if not author:
@@ -54,6 +63,22 @@ async def create_tweet(
 
     await session.commit()
     await session.refresh(tweet)
+
+    # Fire-and-forget fan-out dispatch to Redis queue
+    if redis is not None:
+        try:
+            fanout_payload = json.dumps(
+                {
+                    "author_id": str(tweet.author_id),
+                    "tweet_id": str(tweet.tweet_id),
+                    "created_at": _created_at_epoch(tweet.created_at),
+                }
+            )
+            await redis.lpush("fanout_queue", fanout_payload)
+        except Exception:
+            # Fan-out dispatch is best-effort; timeline will still work
+            # via Postgres fallback on the next read.
+            pass
 
     return TweetResponse(
         tweet_id=tweet.tweet_id,
