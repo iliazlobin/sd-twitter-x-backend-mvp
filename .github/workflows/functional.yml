@@ -7,52 +7,68 @@ on:
   schedule:
     - cron: "17 13 * * *"
 
-env:
-  APP_PORT: 8010
-
 jobs:
   acceptance:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: twitter_x
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Bootstrap .env from example
-        run: cp .env.example .env
-
-      - name: Build and start stack
-        run: docker compose up -d --build
-
-      - name: Run migrations
-        run: docker compose run --rm app alembic upgrade head
-
+      - run: pip install -e ".[dev]"
+      - run: pip install "redis[hiredis]>=5.0"
+      - run: alembic upgrade head
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/twitter_x"
+      - name: Start app
+        run: |
+          uvicorn twitter_x.main:app --host 0.0.0.0 --port 8010 &
+          echo $! > /tmp/app.pid
+        env:
+          DATABASE_URL: "postgresql+asyncpg://postgres:postgres@localhost:5432/twitter_x"
+          REDIS_URL: "redis://localhost:6379/0"
+          PYTHONPATH: src
       - name: Wait for health
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:${{ env.APP_PORT }}/healthz > /dev/null 2>&1; then
+            if curl -sf http://localhost:8010/healthz > /dev/null 2>&1; then
               echo "App is healthy"
               break
             fi
             echo "Waiting for app... ($i)"
             sleep 2
           done
-          curl -sf http://localhost:${{ env.APP_PORT }}/healthz || (echo "App failed to start" && exit 1)
-
-      - name: Install acceptance test deps
-        run: pip install httpx pytest
-
+          curl -sf http://localhost:8010/healthz || (echo "App failed to start" && exit 1)
       - name: Run acceptance tests
-        run: API_BASE_URL="http://localhost:${{ env.APP_PORT }}" python -m pytest verify/acceptance -v
+        run: API_BASE_URL="http://localhost:8010" python -m pytest verify/acceptance -v
         env:
-          API_BASE_URL: "http://localhost:${{ env.APP_PORT }}"
-
-      - name: Dump logs on failure
+          API_BASE_URL: "http://localhost:8010"
+      - name: Kill app on failure
         if: failure()
-        run: docker compose logs app --tail=100
-
-      - name: Teardown
+        run: kill $(cat /tmp/app.pid) 2>/dev/null; true
+      - name: Kill app
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: kill $(cat /tmp/app.pid) 2>/dev/null; true
